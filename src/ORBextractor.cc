@@ -73,33 +73,57 @@ const int PATCH_SIZE = 31;
 const int HALF_PATCH_SIZE = 15;
 const int EDGE_THRESHOLD = 19;
 
-
+// 用于计算某一特征点的方向
+// 
+// Input:
+//      image:      图像
+//      pt:         待计算方向的特征点坐标
+//      umax:       用于快速计算圆坐标的vector,同时保持坐标的对称性
+// Output:
+//      返回计算的方向角度tan值
 static float IC_Angle(const Mat& image, Point2f pt,  const vector<int> & u_max)
 {
+    // 灰度质心法的m01和m10
+    // m_01是y方向的灰度加权，m_10是x方向的灰度加权
     int m_01 = 0, m_10 = 0;
 
+    // 获取特征点所在位置的指针，后面方便使用指针找到像素
     const uchar* center = &image.at<uchar> (cvRound(pt.y), cvRound(pt.x));
 
     // Treat the center line differently, v=0
+    // 先计算中心线一行的m01和m10（因为其他行都要两行两行算），由于中心线处y为0，所以只有m10
     for (int u = -HALF_PATCH_SIZE; u <= HALF_PATCH_SIZE; ++u)
         m_10 += u * center[u];
 
     // Go line by line in the circuI853lar patch
-    int step = (int)image.step1();
+    int step = (int)image.step1();              // 获取内存中一行的个数，为指针找到对应像素做准备
+    // 遍历中间往上的半个PATCH_SIZE，但实际上是一次算上下两行，直接v取-v即可
     for (int v = 1; v <= HALF_PATCH_SIZE; ++v)
     {
         // Proceed over the two lines
         int v_sum = 0;
-        int d = u_max[v];
+        int d = u_max[v];           // 是圆横向的边界，之前在构造函数中算出
+        // 遍历一行的元素，从-d到d
+        // 这里先捋一下如何取做
+        // 我们要累加m10和m01
+        // 对于坐标(x, y)处的像素
+        // 我们计算m10 += x * image[x, y] + x * image[x, -y] = x * (image[x, y] + image[x, -y])
+        // 我们计算m01 += y * image[x, y] - y * image[x, -y] = y * (image[x, y] + image[x, -y])
+        // 但由于下面的循环中，x是一直在变化的，所以x必须在循环内乘，y是不变的，所以可以在循环内加完，到循环外在乘
+        // 全都相加后再循环外乘的好处是，可以减少乘法的次数，提高效率
         for (int u = -d; u <= d; ++u)
         {
+            // val_plus计算的是特征点下方v处对应的每行的值
+            // val_minus计算的是特征点上方v处对应的每行的值
             int val_plus = center[u + v*step], val_minus = center[u - v*step];
             v_sum += (val_plus - val_minus);
             m_10 += u * (val_plus + val_minus);
         }
+        // 由于v在上述循环中不变，所以可以全加完后，在这里乘
         m_01 += v * v_sum;
     }
 
+    // 使用fastAtan2加快计算tan的速度
     return fastAtan2((float)m_01, (float)m_10);
 }
 
@@ -494,11 +518,20 @@ ORBextractor::ORBextractor(int _nfeatures, float _scaleFactor, int _nlevels,
     }
 }
 
+// 用于计算每层金字塔图像中所有特征点的方向，实际上是遍历特征点，一个个的调用IC_Angle函数去算
+// 
+// Input:
+//      image:      某一层待计算特征点方向的图像
+//      keypoints:  该层图像对应的所有特征点,待计算方向
+//      umax:       之前用于快速计算圆坐标的vector,且保持对称性
+// Output:
+//      通过给KeyPoint中的angle成员变量赋值实现输出
 static void computeOrientation(const Mat& image, vector<KeyPoint>& keypoints, const vector<int>& umax)
 {
     for (vector<KeyPoint>::iterator keypoint = keypoints.begin(),
          keypointEnd = keypoints.end(); keypoint != keypointEnd; ++keypoint)
     {
+        // 对每个特征点调用IC_Angle计算特征点方向
         keypoint->angle = IC_Angle(image, keypoint->pt, umax);
     }
 }
@@ -955,22 +988,28 @@ void ORBextractor::ComputeKeyPointsOctTree(vector<vector<KeyPoint> >& allKeypoin
         keypoints = DistributeOctTree(vToDistributeKeys, minBorderX, maxBorderX,
                                       minBorderY, maxBorderY,mnFeaturesPerLevel[level], level);
 
+        // 计算该层金字塔图像需要的PATCH_SIZE大小（用于计算图像灰度质心，从而计算特征点方向）
         const int scaledPatchSize = PATCH_SIZE*mvScaleFactor[level];
 
         // Add border to coordinates and scale information
+        // 因为之前我们计算特征点是在minBorderX, maxBorderX, minBorderY, maxBorderY范围中
+        // 所以这里我们要把特征点的坐标放到扩展完EDGE_THRESHOLD的大图中去，也就是笔记（三）中的白色部分
         const int nkps = keypoints.size();
         for(int i=0; i<nkps ; i++)
         {
-            keypoints[i].pt.x+=minBorderX;
+            keypoints[i].pt.x+=minBorderX;          // 坐标要加上计算特征点时的原点坐标
             keypoints[i].pt.y+=minBorderY;
-            keypoints[i].octave=level;
-            keypoints[i].size = scaledPatchSize;
+            keypoints[i].octave=level;              // 设置该特征点属于哪一个金字塔层
+            keypoints[i].size = scaledPatchSize;    // 设置用于计算特征点方向的PATCH_SIZE
         }
     }
 
     // compute orientations
+    // 计算每一层特征点的方向
     for (int level = 0; level < nlevels; ++level)
-        computeOrientation(mvImagePyramid[level], allKeypoints[level], umax);
+        computeOrientation(mvImagePyramid[level],           // 金字塔图像
+                        allKeypoints[level],                // 该层对应的特征点
+                        umax);                              // 之前用于计算圆坐标的vector
 }
 
 void ORBextractor::ComputeKeyPointsOld(std::vector<std::vector<KeyPoint> > &allKeypoints)

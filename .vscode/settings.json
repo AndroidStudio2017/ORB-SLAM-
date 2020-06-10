@@ -3,6 +3,9 @@
         "string": "cpp",
         "xstring": "cpp",
         "cmath": "cpp",
-        "vector": "cpp"
+        "vector": "cpp",
+        "deque": "cpp",
+        "map": "cpp",
+        "unordered_map": "cpp"
     }
 }

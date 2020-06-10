@@ -123,29 +123,49 @@ static float IC_Angle(const Mat& image, Point2f pt,  const vector<int> & u_max)
         m_01 += v * v_sum;
     }
 
-    // 使用fastAtan2加快计算tan的速度
+    // 使用fastAtan2加快计算tan的速度，[0, 360)，精度为0.3°
     return fastAtan2((float)m_01, (float)m_10);
 }
 
-
+// 这里定义了一个factorPI，是用来将角度制转换为弧度制
 const float factorPI = (float)(CV_PI/180.f);
+// 用于计算单个特征点的steer brief描述子
+// 
+// Input:
+//      kpt:        特征点
+//      img:        图像
+//      pattern:    pattern的首地址
+//      desc:       存储特征点steer brief描述子的首地址
+// Output:
+//      通过desc将结果带出
 static void computeOrbDescriptor(const KeyPoint& kpt,
                                  const Mat& img, const Point* pattern,
                                  uchar* desc)
 {
+    // 将角度制转换为弧度制，即 angle*PI/180，就是弧度制
     float angle = (float)kpt.angle*factorPI;
+    // a = cos(θ), b = sin(θ)
     float a = (float)cos(angle), b = (float)sin(angle);
 
+    // 中心元素的地址，即特征点的地址
     const uchar* center = &img.at<uchar>(cvRound(kpt.pt.y), cvRound(kpt.pt.x));
+    // 图像的每一行长度，便于根据坐标对pattern所在的灰度值进行索引
     const int step = (int)img.step;
 
+    // 这里使用一个宏定义来计算pattern变换之后的坐标
+    // 如果点(x, y)逆时针旋转θ°，成为(x', y'), x = rcos(φ), y = rsin(φ)
+    // 那么x' = rcos(θ + φ) = r * (cosθcosφ - sinθsinφ) = xcosθ - ysinθ
+    //     y' = rsin(θ + φ) = r * (sinθcosφ + cosθsinφ) = xsinθ + ycosθ
+    // 这其实就是在算pattern偏移idx处的点，通过θ角变换之后的位置的灰度值
     #define GET_VALUE(idx) \
-        center[cvRound(pattern[idx].x*b + pattern[idx].y*a)*step + \
-               cvRound(pattern[idx].x*a - pattern[idx].y*b)]
+        center[cvRound(pattern[idx].x*b + pattern[idx].y*a)*step + \        // y'=x*sinθ + y*cosθ
+               cvRound(pattern[idx].x*a - pattern[idx].y*b)]                // x'=x*cosθ - y*sinθ
 
-
+    // 因为一个特征点会得到256位的值，而desc中的元素是uint8，所以要计算32次
+    // 而每次计算会用16个点来得到8位的数，因为是两两比较，所以pattern每次要移动16，因为它是Point*
     for (int i = 0; i < 32; ++i, pattern += 16)
     {
+        // 依次对比8对点，生成8位数
         int t0, t1, val;
         t0 = GET_VALUE(0); t1 = GET_VALUE(1);
         val = t0 < t1;
@@ -164,6 +184,7 @@ static void computeOrbDescriptor(const KeyPoint& kpt,
         t0 = GET_VALUE(14); t1 = GET_VALUE(15);
         val |= (t0 < t1) << 7;
 
+        // 为描述子的第i个8位数赋值
         desc[i] = (uchar)val;
     }
 
@@ -1191,13 +1212,28 @@ void ORBextractor::ComputeKeyPointsOld(std::vector<std::vector<KeyPoint> > &allK
         computeOrientation(mvImagePyramid[level], allKeypoints[level], umax);
 }
 
+// 在图像中计算特征点vector对应的steer brief描述子
+// 
+// Input:
+//      image:          图像
+//      keypoints:      图像中提取出的特征点
+//      descriptors:    用于保存输出的描述子，每一行对应一个特征点的描述子（steer brief）
+//      pattern:        提取设置好的计算描述子的pattern
+// Output:
+//      通过descriptors带回
 static void computeDescriptors(const Mat& image, vector<KeyPoint>& keypoints, Mat& descriptors,
                                const vector<Point>& pattern)
 {
+    // 首先清空描述子，这里也可以看出描述子的构成，每行是一个特征点的描述子，32列，每个元素是uint8，所以每一行是256（32*8）位
     descriptors = Mat::zeros((int)keypoints.size(), 32, CV_8UC1);
 
+    // 遍历每一个特征点
     for (size_t i = 0; i < keypoints.size(); i++)
-        computeOrbDescriptor(keypoints[i], image, &pattern[0], descriptors.ptr((int)i));
+        // 对每一个特征点求取其steer brief描述子
+        computeOrbDescriptor(keypoints[i],                  // 第i个特征点
+                            image,                          // 图像
+                            &pattern[0],                    // pattern的首地址
+                            descriptors.ptr((int)i));       // 第i行的索引，也就是对应的是存储第i个特征点的行
 }
 
 // 用于计算ORB特征的仿函数，通过重载小括号运算符实现
@@ -1228,50 +1264,71 @@ void ORBextractor::operator()( InputArray _image, InputArray _mask, vector<KeyPo
     ComputeKeyPointsOctTree(allKeypoints);
     //ComputeKeyPointsOld(allKeypoints);
 
+    // 下面是在计算ORB特征的描述子 steer brief
     Mat descriptors;
 
-    int nkeypoints = 0;
+    int nkeypoints = 0;         // 所有金字塔图像中特征点的数目和
     for (int level = 0; level < nlevels; ++level)
+        // 累加各个金字塔图层中的特征点数目
         nkeypoints += (int)allKeypoints[level].size();
     if( nkeypoints == 0 )
+        // 如果图像金字塔没有提取到特征点，那就直接（释放资源）？
         _descriptors.release();
     else
     {
+        // 如果有特征点，那么创建nkeypoints行，32列的数据，其中每个数据是uint8类型的
+        // 这里是每一行对应一个keypoints的描述子，32*8是256位，正好是描述子的长度
         _descriptors.create(nkeypoints, 32, CV_8U);
-        descriptors = _descriptors.getMat();
+        descriptors = _descriptors.getMat();            // 这里的getMat()应该是为了把OutputArray转换为矩阵的形式进行操作
     }
 
     _keypoints.clear();
-    _keypoints.reserve(nkeypoints);
+    _keypoints.reserve(nkeypoints);     // 为输出结果的特征点预留所有金字塔图像特征点和的空间
 
+    // 这里的偏移是为了定位对应特征点在descriptors矩阵中的位置（行数）
     int offset = 0;
     for (int level = 0; level < nlevels; ++level)
     {
-        vector<KeyPoint>& keypoints = allKeypoints[level];
-        int nkeypointsLevel = (int)keypoints.size();
+        vector<KeyPoint>& keypoints = allKeypoints[level];      // 当前金字塔层的特征点vector
+        int nkeypointsLevel = (int)keypoints.size();            // 当前金字塔层特征点的数量
 
-        if(nkeypointsLevel==0)
+        if(nkeypointsLevel==0)      // 如果没有特征点，跳过
             continue;
 
         // preprocess the resized image
-        Mat workingMat = mvImagePyramid[level].clone();
-        GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT_101);
+        // 为了提高特征点描述子的鲁棒性，这里在计算特征点描述子的时候采用了高斯滤波，去除一些噪声点的影响.
+        Mat workingMat = mvImagePyramid[level].clone(); // 这里是深拷贝
+        GaussianBlur(workingMat,            // 输入图像
+                    workingMat,             // 输出图像
+                    Size(7, 7),             // 高斯滤波的核大小，必须是正奇数
+                    2,                      // x方向标准差
+                    2,                      // y方向标准差
+                    BORDER_REFLECT_101);    // 边缘处的扩充方法，类似之前copyBorderMaker函数的参数  
 
         // Compute the descriptors
-        Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);
-        computeDescriptors(workingMat, keypoints, desc, pattern);
+        // 这里就用到offset了，就是这一层金字塔的特征点该从哪一行开始计算，这里取计算的范围是[offset.offset + nkeypointsLevel)行
+        Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);  // 这应该是浅拷贝
+        // 计算特征点的描述子
+        computeDescriptors(workingMat,  // 用于计算描述子的图像，这里传入的是高斯模糊后的图像
+                        keypoints,      // 之前计算出的该层的特征点vector
+                        desc,           // 用于存储输出，是全部描述子某几行的浅拷贝
+                        pattern);       // 提前设置好的提取brief描述子的位置
 
+        // 因为又计算了nkeypointsLevel个特征点的描述子，所以offset又要加上这些，下次从新的行开始存储
         offset += nkeypointsLevel;
 
         // Scale keypoint coordinates
+        // 这里是将在各个层提取出的特征点坐标，转换到原始图像的坐标
         if (level != 0)
         {
             float scale = mvScaleFactor[level]; //getScale(level, firstLevel, scaleFactor);
             for (vector<KeyPoint>::iterator keypoint = keypoints.begin(),
                  keypointEnd = keypoints.end(); keypoint != keypointEnd; ++keypoint)
+                // 对于每层的特征点，只需要乘以对应的比例因子就好
                 keypoint->pt *= scale;
         }
         // And add the keypoints to the output
+        // _keypoints是最终得到的特征点，将每一层得到的且转化完坐标的特征点插入到这里面即可
         _keypoints.insert(_keypoints.end(), keypoints.begin(), keypoints.end());
     }
 }

@@ -203,30 +203,42 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 
     // ORB extraction
     // 提取ORB特征
+    // 0-左图， 1-右图，由于是单目，所以只有左图
     ExtractORB(0,imGray);
 
+    // N记录了该帧提取的特征点个数
     N = mvKeys.size();
 
+    // 如果没有提取到特征点，那么返回
     if(mvKeys.empty())
         return;
 
+    // 对提取的特征点坐标进行去畸变的操作
     UndistortKeyPoints();
 
     // Set no stereo information
+    // 因为这是针对单目相机的帧构造函数，所以没有右图和深度图
     mvuRight = vector<float>(N,-1);
     mvDepth = vector<float>(N,-1);
 
+    // 预留的地图点空间, N
     mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    // 预留的外点空间, N， 用来标记某个点是否是外点
     mvbOutlier = vector<bool>(N,false);
 
     // This is done only for the first Frame (or after a change in the calibration)
+    // 这部分代码仅仅在第一帧的时候被使用（或者在内参改变之后）
     if(mbInitialComputations)
     {
+        // 计算畸变后图像的边界，例子见笔记（七） 2
         ComputeImageBounds(imGray);
 
+        // 这里计算的是一个像素对应的grid的列数和行数是多少
+        // 相当于对一个grid列和行占的像素数做了一个倒数
         mfGridElementWidthInv=static_cast<float>(FRAME_GRID_COLS)/static_cast<float>(mnMaxX-mnMinX);
         mfGridElementHeightInv=static_cast<float>(FRAME_GRID_ROWS)/static_cast<float>(mnMaxY-mnMinY);
 
+        // 把相机的内参矩阵参数提取出来，提高计算的效率
         fx = K.at<float>(0,0);
         fy = K.at<float>(1,1);
         cx = K.at<float>(0,2);
@@ -234,26 +246,39 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
         invfx = 1.0f/fx;
         invfy = 1.0f/fy;
 
+        // 在运行完这段代码的时候，将标记变量设置为false，保证只有在第一帧以及内参改变之后运行这段代码
         mbInitialComputations=false;
     }
 
+    // 计算baseline，实际在单目中没有用到
     mb = mbf/fx;
 
+    // 将去畸变后的特征点放到去畸变后的grid中
     AssignFeaturesToGrid();
 }
 
+// 将去畸变后的特征点，放到去畸变后的grid中
+// 
+// Input:
+//      成员变量, mvKeysUn，去畸变后的特征点的vector
+// Output:
+//      成员变量, mGrid，保存不同位置网格中包含的特征点的索引
 void Frame::AssignFeaturesToGrid()
 {
+    // 为每一个网格预分配需要保存的特征点数量
+    // 这里乘0.5，应该是为了节省分配的空间，因为有好多实际用不了那么多空间
     int nReserve = 0.5f*N/(FRAME_GRID_COLS*FRAME_GRID_ROWS);
     for(unsigned int i=0; i<FRAME_GRID_COLS;i++)
         for (unsigned int j=0; j<FRAME_GRID_ROWS;j++)
-            mGrid[i][j].reserve(nReserve);
+            mGrid[i][j].reserve(nReserve);  // 为每个网格预分配空间
 
+    // 将去畸变后的特征点分配到去畸变后的网格中
     for(int i=0;i<N;i++)
     {
         const cv::KeyPoint &kp = mvKeysUn[i];
 
         int nGridPosX, nGridPosY;
+        // 如果kp在nGridPosX, nGridPosY中，那么就将kp的索引加入mGrid[nGridPosX][nGridPosY]
         if(PosInGrid(kp,nGridPosX,nGridPosY))
             mGrid[nGridPosX][nGridPosY].push_back(i);
     }
@@ -401,15 +426,26 @@ vector<size_t> Frame::GetFeaturesInArea(const float &x, const float  &y, const f
     return vIndices;
 }
 
+// 计算kp是否在posX，posY处的网格中，posX, posY是计算出的网格索引，如果在，返回true，否则返回false
+// 
+// Input:
+//      kp:         特征点对象
+//      posX, posY: 根据特征点对象计算出的应该属于的网格的位置坐标
+// Output:
+//      计算出网格坐标如果正常，则返回true，否则返回false
 bool Frame::PosInGrid(const cv::KeyPoint &kp, int &posX, int &posY)
 {
+    // mfGridElementWidthInv是之前计算出的每一个像素对应的网格列数，所以这里求的是对应列的索引
     posX = round((kp.pt.x-mnMinX)*mfGridElementWidthInv);
+    // 与上面相同
     posY = round((kp.pt.y-mnMinY)*mfGridElementHeightInv);
 
     //Keypoint's coordinates are undistorted, which could cause to go out of the image
+    // 如果网格列数的索引或者行数的索引超过了最大值或小于0，则是不正常的，返回false
     if(posX<0 || posX>=FRAME_GRID_COLS || posY<0 || posY>=FRAME_GRID_ROWS)
         return false;
 
+    // 如果正常，返回true
     return true;
 }
 
@@ -423,8 +459,19 @@ void Frame::ComputeBoW()
     }
 }
 
+// 对特征点进行去畸变的操作，去畸变后的特征点结果存储在mvKeysUn中
+// 
+// Input: 
+//      成员变量 mvKeys，提取的图像特征点
+//      成员变量 mDistCoeft，畸变参数
+//      成员变量 mK，内参矩阵
+//      成员变量 N，图像特征点数目
+// Output:
+//      成员变量 mvKeysUn，坐标去畸变后的特征点
 void Frame::UndistortKeyPoints()
 {
+    // 如果畸变参数中的第一个参数为0，即k1为0，那么则不用进行去畸变操作
+    // [k1, k2, p1, p2, k3]
     if(mDistCoef.at<float>(0)==0.0)
     {
         mvKeysUn=mvKeys;
@@ -432,6 +479,7 @@ void Frame::UndistortKeyPoints()
     }
 
     // Fill matrix with points
+    // 为了调用openCV中的 undistortPoints 函数，将坐标处理为2通道矩阵的形式
     cv::Mat mat(N,2,CV_32F);
     for(int i=0; i<N; i++)
     {
@@ -440,11 +488,18 @@ void Frame::UndistortKeyPoints()
     }
 
     // Undistort points
-    mat=mat.reshape(2);
-    cv::undistortPoints(mat,mat,mK,mDistCoef,cv::Mat(),mK);
-    mat=mat.reshape(1);
+    // mat.reshape(channels, rows)
+    mat=mat.reshape(2);         // 这步是在把矩阵变成2通道的形式，这是undistortPoints函数要求的
+                                // 函数要求src格式必须为CV_64F2C或CV_32F2C
+    cv::undistortPoints(mat,mat,        // 原图像和目标图像
+                        mK,             // 原内参矩阵
+                        mDistCoef,      // 畸变参数
+                        cv::Mat(),      // 没有用，暂时置为空矩阵
+                        mK);            // 去畸变后的内参矩阵
+    mat=mat.reshape(1);         // 将矩阵恢复为1通道，方便后面处理
 
     // Fill undistorted keypoint vector
+    // 将mat矩阵中去畸变的结果赋值给成员变量 mvKeysUn
     mvKeysUn.resize(N);
     for(int i=0; i<N; i++)
     {
@@ -455,10 +510,19 @@ void Frame::UndistortKeyPoints()
     }
 }
 
+// 计算去畸变后图像的边界，其实就是图像的四个顶点
+// 
+// Input:
+//      imLeft:     原图像
+// Output:
+//      成员变量 mnMinX, mnMaxX, mnMinY, mnMaxY，即去畸变图像后的四个顶点
 void Frame::ComputeImageBounds(const cv::Mat &imLeft)
 {
+    // 如果畸变参数的第一个数不为0，那么要对四个顶点进行去畸变，找到去畸变后图像的四个顶点的坐标
     if(mDistCoef.at<float>(0)!=0.0)
     {
+        // 与之前的去畸变步骤相同
+        // 首先将去畸变的点组织成2通道矩阵的形式
         cv::Mat mat(4,2,CV_32F);
         mat.at<float>(0,0)=0.0; mat.at<float>(0,1)=0.0;
         mat.at<float>(1,0)=imLeft.cols; mat.at<float>(1,1)=0.0;
@@ -466,16 +530,19 @@ void Frame::ComputeImageBounds(const cv::Mat &imLeft)
         mat.at<float>(3,0)=imLeft.cols; mat.at<float>(3,1)=imLeft.rows;
 
         // Undistort corners
-        mat=mat.reshape(2);
+        mat=mat.reshape(2);         // 将矩阵变为2通道的形式
+        // 利用opencv的undistortPoints对四个顶点的去畸变坐标进行计算
         cv::undistortPoints(mat,mat,mK,mDistCoef,cv::Mat(),mK);
-        mat=mat.reshape(1);
+        mat=mat.reshape(1);         // 恢复矩阵的通道数为1
 
+        // 保存边界
         mnMinX = min(mat.at<float>(0,0),mat.at<float>(2,0));
         mnMaxX = max(mat.at<float>(1,0),mat.at<float>(3,0));
         mnMinY = min(mat.at<float>(0,1),mat.at<float>(1,1));
         mnMaxY = max(mat.at<float>(2,1),mat.at<float>(3,1));
 
     }
+    // 如果畸变参数的第一个数为0，那么就不用对顶点进行变换了
     else
     {
         mnMinX = 0.0f;

@@ -281,8 +281,10 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp)
     return mCurrentFrame.mTcw.clone();
 }
 
+// Tracking进程，用来追踪
 void Tracking::Track()
 {
+    // 如果还没有图片，更改状态为未初始化
     if(mState==NO_IMAGES_YET)
     {
         mState = NOT_INITIALIZED;
@@ -293,10 +295,13 @@ void Tracking::Track()
     // Get Map Mutex -> Map cannot be changed
     unique_lock<mutex> lock(mpMap->mMutexMapUpdate);
 
+    // 如果为初始化，那么进行初始化
     if(mState==NOT_INITIALIZED)
     {
+        // 如果当前是双目或者RGBD，则用双目初始化
         if(mSensor==System::STEREO || mSensor==System::RGBD)
             StereoInitialization();
+        // 如果当前是单目，则用单目初始化
         else
             MonocularInitialization();
 
@@ -577,33 +582,46 @@ void Tracking::StereoInitialization()
     }
 }
 
+// 单目初始化函数，用于生成初始化地图
 void Tracking::MonocularInitialization()
 {
-
+    // mpInitializer为空
+    // 因为初始化需要连续的两帧图像，如果之前有一帧图像则mpInitializer不为空，否则为空
     if(!mpInitializer)
     {
         // Set Reference Frame
+        // 如果当前帧的特征点数目大于100，才能进行初始化
         if(mCurrentFrame.mvKeys.size()>100)
         {
-            mInitialFrame = Frame(mCurrentFrame);
-            mLastFrame = Frame(mCurrentFrame);
-            mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
+            mInitialFrame = Frame(mCurrentFrame);                   // 建立初始化帧
+            mLastFrame = Frame(mCurrentFrame);                      // 建立上一帧
+
+            // mvvPrevMatched存储当前帧，也就是初始帧的去畸变特征点坐标
+            mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());   
             for(size_t i=0; i<mCurrentFrame.mvKeysUn.size(); i++)
                 mvbPrevMatched[i]=mCurrentFrame.mvKeysUn[i].pt;
 
+            // ！！这里判断是多余的，因为前面mpInitializer为空才能进入
             if(mpInitializer)
                 delete mpInitializer;
 
+            // 如果第一次遇到一个特征点数目大于100的帧，则建立mpInitializer
             mpInitializer =  new Initializer(mCurrentFrame,1.0,200);
 
+            // mvIniMatches存储
             fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
 
             return;
         }
     }
+    // 如果上一帧是特征点数目大于100个的初始帧
     else
     {
         // Try to initialize
+        // 看看当前帧是否特征点数目大于100
+        // 如果大于100，则可以进行单目SLAM的初始化；否则，清空mpInitializer，重新进行初始化
+        // 
+        // 这里是保证在初始化的时候要有连续的两个特征点数目大于100的帧才可以进行。
         if((int)mCurrentFrame.mvKeys.size()<=100)
         {
             delete mpInitializer;
@@ -613,8 +631,17 @@ void Tracking::MonocularInitialization()
         }
 
         // Find correspondences
-        ORBmatcher matcher(0.9,true);
-        int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100);
+        // 构建ORBmatcher
+        ORBmatcher matcher(0.9,     // 0.9是最优和次优的比值（先这么记着，具体的还没有看到）
+                        true);      // 
+
+        // 建立初始化帧和当前帧的匹配
+        int nmatches = matcher.SearchForInitialization(mInitialFrame,   // 初始化帧
+                                                    mCurrentFrame,      // 当前帧（和初始帧的连续的两帧）
+                                                    mvbPrevMatched,     // 保存了初始帧中去畸变特征点的坐标
+                                                    mvIniMatches,       // 用于输出匹配结果
+                                                                        // mvIniMatches[i]表示了和初始帧中第i个特征点匹配的当前帧的特征点的索引
+                                                    100);               // 候选特征点窗口大小
 
         // Check if there are enough correspondences
         if(nmatches<100)

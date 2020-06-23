@@ -397,58 +397,100 @@ bool Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)
     return true;
 }
 
+// 找到帧中从minLevel到maxLevel图像金字塔中，以(x,y)为中心，r为half_patch内的所有特征点
+// 
+// Input:
+//      x:          窗口中心的x坐标
+//      y:          窗口中心的y坐标
+//      r:          窗口的half_patch的大小
+//      minLevel:   包括的最小金字塔层数
+//      maxLevel:   包括的最大金字塔层数
+// Output:
+//      返回帧中从minLevel到maxLevel图像金字塔中，以(x,y)为中心，r为half_patch内的所有特征点
 vector<size_t> Frame::GetFeaturesInArea(const float &x, const float  &y, const float  &r, const int minLevel, const int maxLevel) const
 {
+    // 返回值
     vector<size_t> vIndices;
-    vIndices.reserve(N);
+    vIndices.reserve(N);        // N是该帧所有的特征点数目，预留了足够大的空间
 
+    // 关于函数原理可以参见笔记（九）2
+
+    // mfGridElementWidthInv = FRAME_GRID_COLS / (mnMaxX-mnMinX)，表示的是一个像素所占据的Grid列数
+    // 这里 x - mnMinX - r其实计算的是窗口左边界到图像左边界的像素数，然后与mfGridElementWidthInv相乘的到Grid的列数
+    // 这里与0求最大值，表明窗口最左侧是0
     const int nMinCellX = max(0,(int)floor((x-mnMinX-r)*mfGridElementWidthInv));
+    // 保证窗口左边界小于Grid最大列数
     if(nMinCellX>=FRAME_GRID_COLS)
         return vIndices;
 
+    // 与上面相同，求得是窗口右边界
     const int nMaxCellX = min((int)FRAME_GRID_COLS-1,(int)ceil((x-mnMinX+r)*mfGridElementWidthInv));
     if(nMaxCellX<0)
         return vIndices;
 
+    // 窗口上边界
+    // mfGridElementHeightInv = FRAME_GRID_ROWS/ (mnMaxY-mnMinY)，与上面一样
     const int nMinCellY = max(0,(int)floor((y-mnMinY-r)*mfGridElementHeightInv));
     if(nMinCellY>=FRAME_GRID_ROWS)
         return vIndices;
 
+    // 窗口下边界
     const int nMaxCellY = min((int)FRAME_GRID_ROWS-1,(int)ceil((y-mnMinY+r)*mfGridElementHeightInv));
     if(nMaxCellY<0)
         return vIndices;
 
+    // ？？bug：视频说这个是bug，但我感觉也不是，只不过没有明白为什么要这么写？
+    // 可以看一下，或运算是只两个之一满足或者都满足
+    // 满足第一个条件，则后面调用进入判断后，会判断第一个判断语句，跳过第二个
+    // 满足第二个条件，则后面调用进入判断后，会判断第二个判断语句，跳过第一个
+    // 
+    // 这样的好处可能也是为了加速，因为我如果bCheckLevels为false的话，下面就都不需要判断了
+    // 如果不用这个bool变量的话，那么无论怎样都要经过两个判断语句
     const bool bCheckLevels = (minLevel>0) || (maxLevel>=0);
 
+    // 对窗口内得网格进行遍历
     for(int ix = nMinCellX; ix<=nMaxCellX; ix++)
     {
         for(int iy = nMinCellY; iy<=nMaxCellY; iy++)
         {
+            // 获取网格
             const vector<size_t> vCell = mGrid[ix][iy];
+
+            // 如果网格中得特征点为空，那么跳过
             if(vCell.empty())
                 continue;
 
+            // 如果网格中有特征点，那么遍历这些特征点，将满足要求得特征点索引加入结果
             for(size_t j=0, jend=vCell.size(); j<jend; j++)
             {
+                // 获取去畸变特征点kpUn
                 const cv::KeyPoint &kpUn = mvKeysUn[vCell[j]];
+
+                // 对应上面bCheckLevels定义处的解释
                 if(bCheckLevels)
                 {
+                    // 如果该特征点所在金字塔层数小于要求的最小层数，跳过
                     if(kpUn.octave<minLevel)
                         continue;
                     if(maxLevel>=0)
+                        // 如果该特征点所在金字塔层数大于要求的最大层数，跳过
                         if(kpUn.octave>maxLevel)
                             continue;
                 }
 
+                // 如果满足要求，则计算该特征点x方向和y方向距窗口中心的距离
                 const float distx = kpUn.pt.x-x;
                 const float disty = kpUn.pt.y-y;
 
+                // 如果距离均小于r，则将该特征点索引加入结果
+                // 实际窗口应该是一个正方形（而视频说的是圆形）
                 if(fabs(distx)<r && fabs(disty)<r)
                     vIndices.push_back(vCell[j]);
             }
         }
     }
 
+    // 返回结果
     return vIndices;
 }
 

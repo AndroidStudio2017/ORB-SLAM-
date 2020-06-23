@@ -402,11 +402,26 @@ int ORBmatcher::SearchByProjection(KeyFrame* pKF, cv::Mat Scw, const vector<MapP
     return nmatches;
 }
 
+
+// 用来得到初始化时的特征点匹配结果
+// 
+// Input:
+//      F1:                 用于初始化两帧中的前一帧
+//      F2:                 用于初始化两帧中的后一帧
+//      vbPrevMatched:      输入时存储了前一帧中的去畸变特征点
+//      vnMatches12:        用于输出匹配结果，vnMatches12[i]表示前一帧中第i个特征点在后一帧中匹配特征点的索引
+//      windowSize:         候选特征点的窗口大小
+// Output:
+//      返回匹配的特征点个数，同时通过vnMatches12返回匹配的关系
 int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f> &vbPrevMatched, vector<int> &vnMatches12, int windowSize)
 {
+    // 
     int nmatches=0;
+
+    // 初始化vnMatches12，如果没有匹配则值为-1
     vnMatches12 = vector<int>(F1.mvKeysUn.size(),-1);
 
+    // 
     vector<int> rotHist[HISTO_LENGTH];
     for(int i=0;i<HISTO_LENGTH;i++)
         rotHist[i].reserve(500);
@@ -415,14 +430,26 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
     vector<int> vMatchedDistance(F2.mvKeysUn.size(),INT_MAX);
     vector<int> vnMatches21(F2.mvKeysUn.size(),-1);
 
+    // 遍历前一帧中的所有特征点，旨在找到后一帧中匹配的特征点
     for(size_t i1=0, iend1=F1.mvKeysUn.size(); i1<iend1; i1++)
     {
+        // 获取前一帧特征点kp1
         cv::KeyPoint kp1 = F1.mvKeysUn[i1];
-        int level1 = kp1.octave;
-        if(level1>0)
+        int level1 = kp1.octave;        // 前一帧的金字塔层数
+
+        // 如果该特征点所在图像金字塔层数大于0，那么跳过该特征点不考虑
+        // 也就是仅考虑原图像上提取出来的特征点
+        if(level1>0)                
             continue;
 
-        vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
+        // 获取后一帧中对应于前一帧特征点kp1的候选匹配特征点
+        // 其实就是在后一帧的同一位置，找窗口内的特征点，窗口大小为windowSize
+        vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,    // 前一帧特征点的x坐标
+                                                    vbPrevMatched[i1].y,        // 前一帧特征点的y坐标
+                                                    windowSize,                 // 窗口大小
+                                                    level1,                     // 最小图像金字塔层数
+                                                    level1);                    // 最大图像金字塔层数
+                                                                                // 这里仅在level1的图像金字塔中找
 
         if(vIndices2.empty())
             continue;

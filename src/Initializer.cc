@@ -41,27 +41,37 @@ Initializer::Initializer(const Frame &ReferenceFrame, float sigma, int iteration
     mMaxIterations = iterations;
 }
 
+// 
 bool Initializer::Initialize(const Frame &CurrentFrame, const vector<int> &vMatches12, cv::Mat &R21, cv::Mat &t21,
                              vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated)
 {
     // Fill structures with current keypoints and matches with reference frame
     // Reference Frame: 1, Current Frame: 2
+    // mvKeys2保存当前帧的去畸变特征点
     mvKeys2 = CurrentFrame.mvKeysUn;
 
+    // 
     mvMatches12.clear();
     mvMatches12.reserve(mvKeys2.size());
     mvbMatched1.resize(mvKeys1.size());
+
+    // 遍历初始化匹配中求出的初始帧和当前帧的匹配关系，vMatches12[i]保存初始帧第i个特征点匹配的当前帧特征点的索引
     for(size_t i=0, iend=vMatches12.size();i<iend; i++)
     {
+        // 如果初始帧第i个特征点在当前帧中有匹配
         if(vMatches12[i]>=0)
-        {
+        {   
+            // 将匹配关系放到mvMatches12中，mvMatches12保存一个pair
+            // 第一个元素为一个初始帧特征点索引，第二个元素为初始帧特征点匹配的当前帧特征点索引
             mvMatches12.push_back(make_pair(i,vMatches12[i]));
+            // 标记初始帧第i个元素是否有匹配
             mvbMatched1[i]=true;
         }
         else
             mvbMatched1[i]=false;
     }
 
+    // N记录有匹配的特征点对数
     const int N = mvMatches12.size();
 
     // Indices for minimum set selection
@@ -71,28 +81,41 @@ bool Initializer::Initialize(const Frame &CurrentFrame, const vector<int> &vMatc
 
     for(int i=0; i<N; i++)
     {
+        // vAllIndices[i]就保存的是i
         vAllIndices.push_back(i);
     }
 
     // Generate sets of 8 points for each RANSAC iteration
-    mvSets = vector< vector<size_t> >(mMaxIterations,vector<size_t>(8,0));
+    // mvSets保存所有的8点对数
+    mvSets = vector< vector<size_t> >(mMaxIterations,     // mMaxIterations默认为200，即迭代200次，随机生成200个8点对
+                                    vector<size_t>(8,0)); // 一开始都初始化8点对为0
 
-    DUtils::Random::SeedRandOnce(0);
+    DUtils::Random::SeedRandOnce(0);        // 用于随机取数的种子设置
 
+    // 迭代构成8点对集合
     for(int it=0; it<mMaxIterations; it++)
     {
+        // 每次迭代将可用的点对数重新设置为所有匹配点对
         vAvailableIndices = vAllIndices;
 
         // Select a minimum set
+        // 选择8对点
         for(size_t j=0; j<8; j++)
         {
+            // 在可用点对长度内随机选择一个数
             int randi = DUtils::Random::RandomInt(0,vAvailableIndices.size()-1);
+
+            // 拿到选择的这个数的索引
+            // 因为在每次迭代中，选择完的点对索引会被删掉，所以虽然一开始vAvailableIndices中的下标和元素是相等的
+            // 但有些点对被删除之后，就不相等了
             int idx = vAvailableIndices[randi];
 
+            // 将上面取到的点对对应索引放到集合中
             mvSets[it][j] = idx;
 
-            vAvailableIndices[randi] = vAvailableIndices.back();
-            vAvailableIndices.pop_back();
+            // 其实就是在可用点对中删除了刚刚选到的点对
+            vAvailableIndices[randi] = vAvailableIndices.back();    // 把刚才选到点对的位置替换为最后元素
+            vAvailableIndices.pop_back();                           // 删除最后元素（其实刚才被选到的点对索引已经没了）
         }
     }
 
@@ -101,61 +124,84 @@ bool Initializer::Initialize(const Frame &CurrentFrame, const vector<int> &vMatc
     float SH, SF;
     cv::Mat H, F;
 
+    // 开启两个线程分别计算H（单应矩阵）和F（基础矩阵）
     thread threadH(&Initializer::FindHomography,this,ref(vbMatchesInliersH), ref(SH), ref(H));
     thread threadF(&Initializer::FindFundamental,this,ref(vbMatchesInliersF), ref(SF), ref(F));
 
     // Wait until both threads have finished
+    // 等待上面两个进程结束
     threadH.join();
     threadF.join();
 
     // Compute ratio of scores
+    // 计算RH，然后要根据RH选择用单应矩阵来初始化还是选择基础矩阵来初始化
     float RH = SH/(SH+SF);
 
     // Try to reconstruct from homography or fundamental depending on the ratio (0.40-0.45)
+    // 如果RH > 0.4，那么选择用单应矩阵来进行初始化
     if(RH>0.40)
         return ReconstructH(vbMatchesInliersH,H,mK,R21,t21,vP3D,vbTriangulated,1.0,50);
+
+    // 否则选择用基础矩阵来进行初始化
     else //if(pF_HF>0.6)
         return ReconstructF(vbMatchesInliersF,F,mK,R21,t21,vP3D,vbTriangulated,1.0,50);
 
     return false;
 }
 
-
+// 用来计算单应矩阵的函数
+// 
+// Input:
+//      
+// Output:
+//      
 void Initializer::FindHomography(vector<bool> &vbMatchesInliers, float &score, cv::Mat &H21)
 {
     // Number of putative matches
+    // N 初始帧和当前帧的匹配点对数
     const int N = mvMatches12.size();
 
     // Normalize coordinates
+    // 将初始帧和当前帧的特征点进行归一化，详细解释见笔记（十一）1.
     vector<cv::Point2f> vPn1, vPn2;
     cv::Mat T1, T2;
+    // 归一化操作
     Normalize(mvKeys1,vPn1, T1);
     Normalize(mvKeys2,vPn2, T2);
-    cv::Mat T2inv = T2.inv();
+    cv::Mat T2inv = T2.inv();       // 将当前帧特征点求得的归一化矩阵求逆
 
     // Best Results variables
     score = 0.0;
     vbMatchesInliers = vector<bool>(N,false);
 
     // Iteration variables
+    // 这两个就是每次使用的一组8点对
     vector<cv::Point2f> vPn1i(8);
     vector<cv::Point2f> vPn2i(8);
+    // 
     cv::Mat H21i, H12i;
     vector<bool> vbCurrentInliers(N,false);
     float currentScore;
 
     // Perform all RANSAC iterations and save the solution with highest score
+    // 迭代所有8点对的结果，并且保存最好的一次
     for(int it=0; it<mMaxIterations; it++)
     {
         // Select a minimum set
+        // 把8点对取出并赋值给vPn1i和vPn2i
         for(size_t j=0; j<8; j++)
         {
+            // 取出集合中it保存的8点对
             int idx = mvSets[it][j];
 
+            // 这里赋值的是归一化后的点坐标
+            // mvMatches12[i]保存了一个pair，其中第一个元素是初始帧的特征点索引，第二个元素是与之匹配的当前帧特征点索引
             vPn1i[j] = vPn1[mvMatches12[idx].first];
             vPn2i[j] = vPn2[mvMatches12[idx].second];
         }
 
+        // 用8点法计算单应矩阵，原理见笔记（十一）2.3.
+        // 这里求得的单应矩阵是vPn1i中的点乘单应矩阵可以转化为vPn2i中的点
         cv::Mat Hn = ComputeH21(vPn1i,vPn2i);
         H21i = T2inv*Hn*T1;
         H12i = H21i.inv();
@@ -222,13 +268,22 @@ void Initializer::FindFundamental(vector<bool> &vbMatchesInliers, float &score, 
     }
 }
 
-
+// 8点法计算单应矩阵,用DLT方法，求最小二乘解
+// 
+// Input:
+//      vP1:    初始帧中归一化后的8个点
+//      vP2:    与初始帧中对应的，当前帧中归一化后的8个点
+// Output:
+//      返回值返回单应矩阵H21,是p2 = H21 * p1
 cv::Mat Initializer::ComputeH21(const vector<cv::Point2f> &vP1, const vector<cv::Point2f> &vP2)
 {
+    // N 点对的数目，应该用4个点对就可以求，但是这里面用了8个
     const int N = vP1.size();
 
+    // 建立2N×9的系数矩阵，对应于单应矩阵的原理
     cv::Mat A(2*N,9,CV_32F);
 
+    // 按照原理推算，给系数矩阵赋值
     for(int i=0; i<N; i++)
     {
         const float u1 = vP1[i].x;
@@ -258,10 +313,17 @@ cv::Mat Initializer::ComputeH21(const vector<cv::Point2f> &vP1, const vector<cv:
 
     }
 
+    // 求解SVD
     cv::Mat u,w,vt;
 
-    cv::SVDecomp(A,w,u,vt,cv::SVD::MODIFY_A | cv::SVD::FULL_UV);
+    cv::SVDecomp(A,         // 待SVD分解的系数矩阵
+                w,          // 分解后的奇异值矩阵
+                u,          // 分解后的左正交阵
+                vt,         // 分解后的右正交阵
+                cv::SVD::MODIFY_A | cv::SVD::FULL_UV);      // OpenCV SVD函数的选项（具体查看文档）
 
+    // SVD结果中，vt的第9行即为我们所求的单应矩阵，原因见笔记（十一）3.
+    // 求出来一行是9个值，我们把它reshape成3×3的矩阵
     return vt.row(8).reshape(0, 3);
 }
 
@@ -746,26 +808,40 @@ void Initializer::Triangulate(const cv::KeyPoint &kp1, const cv::KeyPoint &kp2, 
     x3D = x3D.rowRange(0,3)/x3D.at<float>(3);
 }
 
+// 归一化函数，原理见笔记（十一）1.
+//
+// Input:
+//      vKeys:              特征点向量
+//      vNormalizedPoints:  归一化特征点的结果
+//      T:                  归一化矩阵（后面复原要用到）
+// Output:
+//      输出由vNormalizedPoints和T带出，就是归一化特征点的结果和归一化矩阵
 void Initializer::Normalize(const vector<cv::KeyPoint> &vKeys, vector<cv::Point2f> &vNormalizedPoints, cv::Mat &T)
 {
+    // 用来保存X,Y方向均值
     float meanX = 0;
     float meanY = 0;
+    // 保存特征点数量
     const int N = vKeys.size();
 
     vNormalizedPoints.resize(N);
 
+    // 遍历所有特征点，为了求均值
     for(int i=0; i<N; i++)
     {
         meanX += vKeys[i].pt.x;
         meanY += vKeys[i].pt.y;
     }
 
+    // 先求和再除以数目求均值
     meanX = meanX/N;
     meanY = meanY/N;
 
+    // 用来保存 Σ|x - meanx| / N
     float meanDevX = 0;
     float meanDevY = 0;
 
+    // 遍历所有特征点，求|x - meanx|的和
     for(int i=0; i<N; i++)
     {
         vNormalizedPoints[i].x = vKeys[i].pt.x - meanX;
@@ -775,18 +851,22 @@ void Initializer::Normalize(const vector<cv::KeyPoint> &vKeys, vector<cv::Point2
         meanDevY += fabs(vNormalizedPoints[i].y);
     }
 
+    // 求得Σ|x - meanx| / N
     meanDevX = meanDevX/N;
     meanDevY = meanDevY/N;
 
+    // 因为后面要进行除法，所以先取倒数，后面执行乘法
     float sX = 1.0/meanDevX;
     float sY = 1.0/meanDevY;
 
+    // 遍历所有特征点，得到归一化结果
     for(int i=0; i<N; i++)
     {
         vNormalizedPoints[i].x = vNormalizedPoints[i].x * sX;
         vNormalizedPoints[i].y = vNormalizedPoints[i].y * sY;
     }
 
+    // 这里其实是上面一样的过程，只不过是变成了矩阵的形式，其实上面的过程就是 x' = Tx, y' = Ty
     T = cv::Mat::eye(3,3,CV_32F);
     T.at<float>(0,0) = sX;
     T.at<float>(1,1) = sY;

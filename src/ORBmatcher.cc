@@ -408,26 +408,35 @@ int ORBmatcher::SearchByProjection(KeyFrame* pKF, cv::Mat Scw, const vector<MapP
 // Input:
 //      F1:                 用于初始化两帧中的前一帧
 //      F2:                 用于初始化两帧中的后一帧
-//      vbPrevMatched:      输入时存储了前一帧中的去畸变特征点
+//      vbPrevMatched:      输入时存储了前一帧中的去畸变特征点，输出时vbPrevMatched[i]保存了初始帧第i个特征点匹配的当前
+//                          帧特征点索引
 //      vnMatches12:        用于输出匹配结果，vnMatches12[i]表示前一帧中第i个特征点在后一帧中匹配特征点的索引
 //      windowSize:         候选特征点的窗口大小
 // Output:
 //      返回匹配的特征点个数，同时通过vnMatches12返回匹配的关系
 int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f> &vbPrevMatched, vector<int> &vnMatches12, int windowSize)
 {
-    // 
+    // 这里nmatches用于记录匹配的特征点数目
     int nmatches=0;
 
     // 初始化vnMatches12，如果没有匹配则值为-1
     vnMatches12 = vector<int>(F1.mvKeysUn.size(),-1);
 
-    // 
+    // 统计所有匹配特征点的旋转直方图，用于过滤旋转角度差过大的特征点匹配
     vector<int> rotHist[HISTO_LENGTH];
-    for(int i=0;i<HISTO_LENGTH;i++)
-        rotHist[i].reserve(500);
+    for(int i=0;i<HISTO_LENGTH;i++)         
+        rotHist[i].reserve(500);        // 预分配每一个直方图高度为500
+
+    // ！！这里应该是有错误的
+    // 应该改为 const float factor = HISTO_LENGTH / 360.0f
+    // 因为HISTO_LENGTH指明直方图的长度，以笔记（十）中的直方图来说，HISTO_LENGTH = 6，每个bar的范围是60°
+    // 那么如果两个匹配特征点之间的角度差为359°，按照原来代码，该角度差会落在第60个bar，而其实应该落在第6个bar
+    // 详细可以看笔记（十）中的解释
     const float factor = 1.0f/HISTO_LENGTH;
 
+    // 保存当前帧中特征点和初始帧特征点匹配的距离，如果没有匹配点，则距离为MAX_INT
     vector<int> vMatchedDistance(F2.mvKeysUn.size(),INT_MAX);
+    // vnMatches21[i]表示当前帧中第i个特征点匹配初始帧中特征点的索引
     vector<int> vnMatches21(F2.mvKeysUn.size(),-1);
 
     // 遍历前一帧中的所有特征点，旨在找到后一帧中匹配的特征点
@@ -451,26 +460,35 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
                                                     level1);                    // 最大图像金字塔层数
                                                                                 // 这里仅在level1的图像金字塔中找
 
+        // 如果当前帧中候选特征点为空，那么初始帧的该特征点无匹配点，跳过
         if(vIndices2.empty())
             continue;
 
+        // 取得当前遍历的初始帧特征点的描述子
         cv::Mat d1 = F1.mDescriptors.row(i1);
 
-        int bestDist = INT_MAX;
-        int bestDist2 = INT_MAX;
-        int bestIdx2 = -1;
+        int bestDist = INT_MAX;         // 最小距离
+        int bestDist2 = INT_MAX;        // 次小距离
+        int bestIdx2 = -1;              // 取得最小距离时，对应当前帧特征点的索引
 
+        // 遍历当前帧候选特征点
         for(vector<size_t>::iterator vit=vIndices2.begin(); vit!=vIndices2.end(); vit++)
         {
+            // 当前帧特征点的索引
             size_t i2 = *vit;
 
+            // 取得当前遍历的当前帧特征点的描述子
             cv::Mat d2 = F2.mDescriptors.row(i2);
 
+            // 计算描述子之前距离
             int dist = DescriptorDistance(d1,d2);
 
+            // 如果计算的dist比MAX_INT还大，或者就是MAX_INT，那舍弃
+            // 我觉得这个好像没啥用
             if(vMatchedDistance[i2]<=dist)
                 continue;
 
+            // 下面就是在保存最小距离和次小距离
             if(dist<bestDist)
             {
                 bestDist2=bestDist;
@@ -483,29 +501,42 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
             }
         }
 
+        // 上面求得的描述子最小距离小于一定阈值才予以考虑，不然直接当做没有匹配
         if(bestDist<=TH_LOW)
         {
+            // 最小和次小距离之间，要大于一定的比例关系
+            // 就是次小距离要比最小距离大的多一些，使最小距离的匹配有一定的唯一性，突出性，才作为匹配点
             if(bestDist<(float)bestDist2*mfNNratio)
             {
+                // 如果之前bestIdx2对应的当前帧特征点已有过匹配，则删除原匹配
+                // 如果有原配，则离婚，要小三（开玩笑开玩笑）
                 if(vnMatches21[bestIdx2]>=0)
                 {
                     vnMatches12[vnMatches21[bestIdx2]]=-1;
                     nmatches--;
                 }
-                vnMatches12[i1]=bestIdx2;
-                vnMatches21[bestIdx2]=i1;
-                vMatchedDistance[bestIdx2]=bestDist;
-                nmatches++;
+                
+                vnMatches12[i1]=bestIdx2;               // 设置初始帧特征点的匹配点索引为bestIdx2
+                vnMatches21[bestIdx2]=i1;               // 设置当前帧特征点的匹配点索引为i1
+                vMatchedDistance[bestIdx2]=bestDist;    // 设置当前帧特征点的匹配距离为上面求得的最小距离
+                nmatches++;                             // 匹配数 +1
 
+                // 如果设置了要用旋转直方图来滤除异常匹配，则执行下面代码
                 if(mbCheckOrientation)
                 {
+                    // 计算匹配点的角度差，角度制，非弧度制
                     float rot = F1.mvKeysUn[i1].angle-F2.mvKeysUn[bestIdx2].angle;
                     if(rot<0.0)
                         rot+=360.0f;
+
+                    // 就是上面提到的，这里rot*factor就是将角度差映射到旋转直方图的bar中
                     int bin = round(rot*factor);
-                    if(bin==HISTO_LENGTH)
+                    if(bin==HISTO_LENGTH)       // 因为用的是round，而且是循环，如果最大了就归零
                         bin=0;
+
+                    // 这里一定要保证bin在[0, HISTO_LENGTH)之间，不然会超索引报错
                     assert(bin>=0 && bin<HISTO_LENGTH);
+                    // 将该初始帧特征点索引加入到旋转直方图对应的bar中
                     rotHist[bin].push_back(i1);
                 }
             }
@@ -513,21 +544,29 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
 
     }
 
+    // 根据旋转直方图，滤除一些异常点
     if(mbCheckOrientation)
     {
         int ind1=-1;
         int ind2=-1;
         int ind3=-1;
 
+        // 获取直方图中高度最高的三个bar的索引，然后如果特征点处于其他bar中，都滤除
+        // 函数中也设置了，如果这三个bar的高度差距太过悬殊，也要适当的滤除
         ComputeThreeMaxima(rotHist,HISTO_LENGTH,ind1,ind2,ind3);
 
         for(int i=0; i<HISTO_LENGTH; i++)
         {
+            // 如果是三个最高的bar中的一个，则跳过
             if(i==ind1 || i==ind2 || i==ind3)
                 continue;
+
+            // 否则遍历bar中的特征点，将匹配关系删除
             for(size_t j=0, jend=rotHist[i].size(); j<jend; j++)
             {
+                // 获得bar中存储的初始帧特征点的索引
                 int idx1 = rotHist[i][j];
+                // 如果该特征点有匹配，则删除
                 if(vnMatches12[idx1]>=0)
                 {
                     vnMatches12[idx1]=-1;
@@ -539,10 +578,12 @@ int ORBmatcher::SearchForInitialization(Frame &F1, Frame &F2, vector<cv::Point2f
     }
 
     //Update prev matched
+    // 将vbPrevMatched[i]更新为初始帧中第i个特征点匹配的当前帧中特征点的坐标
     for(size_t i1=0, iend1=vnMatches12.size(); i1<iend1; i1++)
         if(vnMatches12[i1]>=0)
             vbPrevMatched[i1]=F2.mvKeysUn[vnMatches12[i1]].pt;
 
+    // 返回匹配的特征点个数
     return nmatches;
 }
 
@@ -1625,12 +1666,23 @@ int ORBmatcher::SearchByProjection(Frame &CurrentFrame, KeyFrame *pKF, const set
     return nmatches;
 }
 
+// 计算旋转直方图中高度最高的三个bar的索引
+//
+// Input:
+//      histo:          旋转直方图，histo[i]表示直方图的第i个bar
+//      L:              旋转直方图的长度，也就是histod的size()
+//      ind1:           用于返回最高的bar的索引
+//      ind2:           用于返回次高的bar的索引
+//      ind3:           用于返回第三高的bar的索引
+// Output:
+//      通过ind1, ind2, ind3返回
 void ORBmatcher::ComputeThreeMaxima(vector<int>* histo, const int L, int &ind1, int &ind2, int &ind3)
 {
     int max1=0;
     int max2=0;
     int max3=0;
 
+    // 用之前求最小和次小的方法求得
     for(int i=0; i<L; i++)
     {
         const int s = histo[i].size();
@@ -1657,6 +1709,8 @@ void ORBmatcher::ComputeThreeMaxima(vector<int>* histo, const int L, int &ind1, 
         }
     }
 
+    // 这里又加了一层滤除
+    // 如果次高的bar高度或者第三高的bar小于最高的bar的高度的十分之一，则剔除
     if(max2<0.1f*(float)max1)
     {
         ind2=-1;

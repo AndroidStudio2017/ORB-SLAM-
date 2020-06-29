@@ -644,6 +644,7 @@ void Tracking::MonocularInitialization()
                                                     100);               // 候选特征点窗口大小
 
         // Check if there are enough correspondences
+        // 如果匹配点数小于100，则认为匹配点数不够进行初始化，则删除初始化器，重新初始化
         if(nmatches<100)
         {
             delete mpInitializer;
@@ -651,11 +652,18 @@ void Tracking::MonocularInitialization()
             return;
         }
 
+        // 当前帧的旋转和平移矩阵
         cv::Mat Rcw; // Current Camera Rotation
         cv::Mat tcw; // Current Camera Translation
+
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
 
-        if(mpInitializer->Initialize(mCurrentFrame, mvIniMatches, Rcw, tcw, mvIniP3D, vbTriangulated))
+        if(mpInitializer->Initialize(mCurrentFrame,     // 当前帧
+                                    mvIniMatches,       // 之前计算出的初始帧和当前帧的匹配关系
+                                                        // mvIniMatches[i]保存初始帧第i个特征点匹配的当前帧特征点索引
+                                    Rcw, tcw,           // 求出的旋转和平移矩阵，世界坐标系相对于当前帧坐标系
+                                    mvIniP3D,           // 求出初始化的3D点
+                                    vbTriangulated))    // 
         {
             for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
             {

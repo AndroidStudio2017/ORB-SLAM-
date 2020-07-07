@@ -152,9 +152,11 @@ bool Initializer::Initialize(const Frame &CurrentFrame, const vector<int> &vMatc
 // 用来计算单应矩阵的函数
 // 
 // Input:
-//      
+//      vbMatchesInliers:   vbMatchesInliers[i]为true，表示mvMatches12中索引为i的匹配点对为内点
+//      score:              计算的単应矩阵对应的评分
+//      H21:                计算的単应矩阵的结果
 // Output:
-//      
+//      通过输入参数返回计算得到的単应矩阵，以及単应矩阵的评分和对应的内点情况
 void Initializer::FindHomography(vector<bool> &vbMatchesInliers, float &score, cv::Mat &H21)
 {
     // Number of putative matches
@@ -203,48 +205,78 @@ void Initializer::FindHomography(vector<bool> &vbMatchesInliers, float &score, c
         // 用8点法计算单应矩阵，原理见笔记（十一）2.3.
         // 这里求得的单应矩阵是vPn1i中的点乘单应矩阵可以转化为vPn2i中的点
         cv::Mat Hn = ComputeH21(vPn1i,vPn2i);
+
+        // 因为上面求単应矩阵是用的归一化后的点求得，但是我们想要的是原特征点之间的単应矩阵关系
+        // vPn2i = Hn * vPn1i
+        // vPn2i = T2 * mvKeys2, vPn1i = T1 * mvKeys1
+        // (T2 * mvKeys2) = Hn * (T1 * mvKeys1)
+        // mvKeys2 = T2inv * Hn * T1 * mvKeys1
+        // 所以我们需要的単应矩阵 H = T2inv * Hn * T1
         H21i = T2inv*Hn*T1;
-        H12i = H21i.inv();
+        H12i = H21i.inv();      // 求一下単应矩阵的逆，方便后面评分
 
-        currentScore = CheckHomography(H21i, H12i, vbCurrentInliers, mSigma);
+        // 对RANSAC的每一组点对求得的単应矩阵进行评分
+        currentScore = CheckHomography(H21i, H12i,          // 利用8点对求得的単应矩阵
+                                    vbCurrentInliers,       // 用于输出当前単应矩阵对应的内点,
+                                                            // vbCurrentInliers[i]为true，证明第i对匹配点为内点
+                                    mSigma);                // 卡方检验的权重
 
+        // 因为是要用RANSAC找到最好的単应矩阵，所以这里我们要保存最好的评分对应的単应矩阵和其对应的内点
         if(currentScore>score)
         {
+            // 保存最好的単应矩阵
             H21 = H21i.clone();
+            // 保存内点情况
             vbMatchesInliers = vbCurrentInliers;
+            // 用于找到最大值分数
             score = currentScore;
         }
     }
 }
 
-
+// 计算初始帧和当前帧之间的基础矩阵
+// 
+// Input:
+//      vbMatchesInliers:       vbMatchesInliers[i]为true，表示vbMatches12索引为i的匹配点为内点
+//      score:                  求得的基础矩阵对应的卡方检验的评分
+//      F21:                    求得的基础矩阵
+// Output:
+//      通过输入参数返回求得的基础矩阵，以及评分和内点情况
 void Initializer::FindFundamental(vector<bool> &vbMatchesInliers, float &score, cv::Mat &F21)
 {
     // Number of putative matches
+    // ！！我觉得这里有点问题，vbMatchesInliers并没有初始化，所以size应该是0
+    // 这里我想应该和単应矩阵那里一样，是mvMatches12的size
     const int N = vbMatchesInliers.size();
 
     // Normalize coordinates
+    // 对特征点坐标进行归一化
     vector<cv::Point2f> vPn1, vPn2;
     cv::Mat T1, T2;
     Normalize(mvKeys1,vPn1, T1);
     Normalize(mvKeys2,vPn2, T2);
+
+    // 因为是基础矩阵，所以归一化后恢复和単应矩阵有所不同，需要用到T2的转职
     cv::Mat T2t = T2.t();
 
     // Best Results variables
+    // 初始化存储最好分数和内点情况的结果变量
     score = 0.0;
     vbMatchesInliers = vector<bool>(N,false);
 
     // Iteration variables
-    vector<cv::Point2f> vPn1i(8);
-    vector<cv::Point2f> vPn2i(8);
-    cv::Mat F21i;
-    vector<bool> vbCurrentInliers(N,false);
-    float currentScore;
+    vector<cv::Point2f> vPn1i(8);       // 初始帧中的8个点
+    vector<cv::Point2f> vPn2i(8);       // 当前帧中的8个点
+    cv::Mat F21i;                       // 求得基础矩阵的临时变量
+    vector<bool> vbCurrentInliers(N,false);     // 求得内点情况的临时变量
+    float currentScore;                 // 球儿的当前分数的临时变量
 
     // Perform all RANSAC iterations and save the solution with highest score
+    // 遍历每个8点对
     for(int it=0; it<mMaxIterations; it++)
     {
         // Select a minimum set
+        // 获取到8点对，不过是归一化坐标
         for(int j=0; j<8; j++)
         {
             int idx = mvSets[it][j];
@@ -253,16 +285,30 @@ void Initializer::FindFundamental(vector<bool> &vbMatchesInliers, float &score, 
             vPn2i[j] = vPn2[mvMatches12[idx].second];
         }
 
+        // 根据8点对求得基础矩阵
         cv::Mat Fn = ComputeF21(vPn1i,vPn2i);
 
+        // 与単应矩阵同理，因为我们上面求得的Fn是特征点归一化后的基础矩阵，所以需要进行转换
+        // vPn2i^t * Fn * vPn1i = 0
+        // vPn2i = T2 * mvKeys2, vPn1i = T1 * mvKeys1
+        // (T2 * mvKeys2)^t * Fn * (T1 * mvKeys1) = 0
+        // mvKeys2^t * T2^t * Fn * T1 * mvKeys1 = 0
+        // 所以实际特征点之间的基础矩阵为 T2^t * Fn * T1
         F21i = T2t*Fn*T1;
 
-        currentScore = CheckFundamental(F21i, vbCurrentInliers, mSigma);
+        // 利用卡方检验对求得的基础矩阵进行评分，并且标记内点和外点
+        currentScore = CheckFundamental(F21i,           // 求得的基础矩阵
+                                    vbCurrentInliers,   // 记录当前基础矩阵对应的内点情况
+                                    mSigma);            // 卡方检验用到的权值
 
+        // 记录评分最高的基础矩阵及其对应的内点情况
         if(currentScore>score)
         {
+            // 保存评分最高的基础矩阵
             F21 = F21i.clone();
+            // 该基础矩阵对应的内点情况
             vbMatchesInliers = vbCurrentInliers;
+            // 用于计算最高分
             score = currentScore;
         }
     }
@@ -327,12 +373,23 @@ cv::Mat Initializer::ComputeH21(const vector<cv::Point2f> &vP1, const vector<cv:
     return vt.row(8).reshape(0, 3);
 }
 
+// 利用8点对求得基础矩阵，原理 p2^t * F21 * p1 = 0
+// l2 = F21 * p1，可以根据p1点和基础矩阵求得在image2中对应的极线
+//
+// Input:
+//      vP1:    Image1中的8个特征点
+//      vP2:    Image2中的8个特征点
+// Output:
+//      返回求得的基础矩阵
 cv::Mat Initializer::ComputeF21(const vector<cv::Point2f> &vP1,const vector<cv::Point2f> &vP2)
 {
+    // N 所使用的特征点对的数量
     const int N = vP1.size();
 
+    // A为系数矩阵
     cv::Mat A(N,9,CV_32F);
 
+    // 根据基础矩阵的原理构造其系数矩阵
     for(int i=0; i<N; i++)
     {
         const float u1 = vP1[i].x;
@@ -353,21 +410,41 @@ cv::Mat Initializer::ComputeF21(const vector<cv::Point2f> &vP1,const vector<cv::
 
     cv::Mat u,w,vt;
 
+    // 对系数矩阵进行SVD分解，从而求得基础矩阵
     cv::SVDecomp(A,w,u,vt,cv::SVD::MODIFY_A | cv::SVD::FULL_UV);
 
+    // 与之前的単应矩阵同理，求得的最后一个特征向量的误差最小，即最优值
     cv::Mat Fpre = vt.row(8).reshape(0, 3);
 
+    // 但由于基础矩阵一个重要的性质是其秩为2，所以我们需要再次对上面求得的Fpre进行SVD分解
+    // 并且将w的最后一个特征值置为0，使其秩为2，然后再重新构建更精确的基础矩阵
     cv::SVDecomp(Fpre,w,u,vt,cv::SVD::MODIFY_A | cv::SVD::FULL_UV);
 
+    // 将w的最后一个特征值置为2
     w.at<float>(2)=0;
 
+    // 返回重新构建的更加准确的基础矩阵
     return  u*cv::Mat::diag(w)*vt;
 }
 
+// 利用卡方检验对求得的単应矩阵评分
+// 
+// Input: 
+//      H21:        p2 = H21 * p1
+//      H12:        p1 = H12 * p2
+//      vbMatchesInliers:       vbMatchesInliers[i]为true，表示mvMatches12中索引为i的那对匹配点是内点
+//      sigma:      卡方检验用到的权重
+// Output:
+//      返回评分结果，通过vbMatchesInliers返回这个単应矩阵所对应的内点   
+// 原理：
+// 通过求取|| p2 - H21 * p1 ||来得到误差，然后通过卡方检验来对误差进行评分
+// 同时也要求取反方向的评分，即|| p1 - H12 * p2 ||
 float Initializer::CheckHomography(const cv::Mat &H21, const cv::Mat &H12, vector<bool> &vbMatchesInliers, float sigma)
 {   
+    // N 当前帧和初始帧所有匹配的点对数
     const int N = mvMatches12.size();
 
+    // 将単应矩阵H21中的值取出来
     const float h11 = H21.at<float>(0,0);
     const float h12 = H21.at<float>(0,1);
     const float h13 = H21.at<float>(0,2);
@@ -378,6 +455,7 @@ float Initializer::CheckHomography(const cv::Mat &H21, const cv::Mat &H12, vecto
     const float h32 = H21.at<float>(2,1);
     const float h33 = H21.at<float>(2,2);
 
+    // 将単应矩阵H12中的值取出来
     const float h11inv = H12.at<float>(0,0);
     const float h12inv = H12.at<float>(0,1);
     const float h13inv = H12.at<float>(0,2);
@@ -388,21 +466,30 @@ float Initializer::CheckHomography(const cv::Mat &H21, const cv::Mat &H12, vecto
     const float h32inv = H12.at<float>(2,1);
     const float h33inv = H12.at<float>(2,2);
 
+    // 预分配内存
     vbMatchesInliers.resize(N);
 
+    // 记录得分，要累加两个方向的得分
     float score = 0;
 
+    // 这是自由度为2的卡方分布，显著性水平为0.05的临界阈值
     const float th = 5.991;
 
+    // 权重
     const float invSigmaSquare = 1.0/(sigma*sigma);
 
+    // 对于所有匹配点，累计误差评分
     for(int i=0; i<N; i++)
     {
+        // 一开始假设是内点
         bool bIn = true;
 
+        // 获取匹配点的坐标
         const cv::KeyPoint &kp1 = mvKeys1[mvMatches12[i].first];
         const cv::KeyPoint &kp2 = mvKeys2[mvMatches12[i].second];
 
+        // 初始帧特征点坐标(u1, v1)
+        // 当前帧特征点坐标(u2, v2)
         const float u1 = kp1.pt.x;
         const float v1 = kp1.pt.y;
         const float u2 = kp2.pt.x;
@@ -411,48 +498,81 @@ float Initializer::CheckHomography(const cv::Mat &H21, const cv::Mat &H12, vecto
         // Reprojection error in first image
         // x2in1 = H12*x2
 
+        // p1 = H12 * p2
+        // |u1|   |h11 h12 h13||u2|   |u2in1|
+        // |v1| = |h21 h22 h23||v2| = |v2in1| * w2in1
+        // |1 |   |h31 h32 h33||1 |   |1    |
+        // 其实这段代码就是在求当前帧特征点在初始帧上的投影，即p2在Image1上的投影
         const float w2in1inv = 1.0/(h31inv*u2+h32inv*v2+h33inv);
         const float u2in1 = (h11inv*u2+h12inv*v2+h13inv)*w2in1inv;
         const float v2in1 = (h21inv*u2+h22inv*v2+h23inv)*w2in1inv;
 
+        // 重投影误差的平方
+        // (p1 - H12 * p2)^2
         const float squareDist1 = (u1-u2in1)*(u1-u2in1)+(v1-v2in1)*(v1-v2in1);
 
+        // 乘权重转换为卡方的误差
         const float chiSquare1 = squareDist1*invSigmaSquare;
 
+        // 如果误差大于阈值，则标记为外点
         if(chiSquare1>th)
             bIn = false;
         else
+            // 如果误差小于等于阈值，则可以接受，计算评分
+            // chiSquare1代表了误差，误差越大，则chiSquare1越接近th，则评分越小
+            // 这里是累加，用所有点的评分和来选择好的単应矩阵
             score += th - chiSquare1;
 
         // Reprojection error in second image
         // x1in2 = H21*x1
 
+        // 下面的过程和上面一样，只不过是在算反方向，即|| p2 - H21 * p1 ||
+        // p1在image2上的重投影误差
         const float w1in2inv = 1.0/(h31*u1+h32*v1+h33);
         const float u1in2 = (h11*u1+h12*v1+h13)*w1in2inv;
         const float v1in2 = (h21*u1+h22*v1+h23)*w1in2inv;
 
+        // 计算p1到image2上的重投影误差
+        // 即初始帧特征点到当前帧的重投影误差
         const float squareDist2 = (u2-u1in2)*(u2-u1in2)+(v2-v1in2)*(v2-v1in2);
 
+        // 乘卡方检验的权重
         const float chiSquare2 = squareDist2*invSigmaSquare;
 
+        // 如果误差大于阈值，则标记为外点
         if(chiSquare2>th)
             bIn = false;
         else
+            // 如果误差小于等于阈值，则计算分数
+            // chiSquare2代表了误差，误差越大，则chiSquare2越接近th，则评分越小
+            // 这里是累加，用所有点的评分和来选择好的単应矩阵
             score += th - chiSquare2;
 
+        // 利用vbMatchesInliers来记录当前単应矩阵对应的所有内点和外点
         if(bIn)
             vbMatchesInliers[i]=true;
         else
             vbMatchesInliers[i]=false;
     }
 
+    // 返回卡方检验计算的分数
     return score;
 }
 
+// 对计算得到的基础矩阵，利用卡方检验进行评分，并且计算其对应的内点情况
+// 
+// Input:
+//      F21:    求得的基础矩阵      
+//      vbMatchesInliers:   用于反映该基础矩阵对应的内点情况
+//      sigma:  卡方检验用到的权值
+// Output:
+//      返回该基础矩阵的评分，并且通过输入参数返回内点情况
 float Initializer::CheckFundamental(const cv::Mat &F21, vector<bool> &vbMatchesInliers, float sigma)
 {
+    // N 所有两帧之间的匹配点个数
     const int N = mvMatches12.size();
 
+    // 提取基础矩阵中的值
     const float f11 = F21.at<float>(0,0);
     const float f12 = F21.at<float>(0,1);
     const float f13 = F21.at<float>(0,2);
@@ -463,22 +583,34 @@ float Initializer::CheckFundamental(const cv::Mat &F21, vector<bool> &vbMatchesI
     const float f32 = F21.at<float>(2,1);
     const float f33 = F21.at<float>(2,2);
 
+    // 预分配内存
     vbMatchesInliers.resize(N);
 
+    // 用于累加分数
     float score = 0;
 
+    // 这里设定了两个阈值，一个是用于判断内外点，另一个是用于计算分数
+    // 3.841是自由度为1的卡方分布，显著性水平为0.05的临界阈值
     const float th = 3.841;
+
+    // 这里又使用了这个阈值来计算分数，应该是为了保证和単应矩阵分数计算的一致性
     const float thScore = 5.991;
 
+    // 卡方检验用到的权值
     const float invSigmaSquare = 1.0/(sigma*sigma);
 
+    // 遍历所有的匹配点对
     for(int i=0; i<N; i++)
     {
+        // 开始认为都是内点
         bool bIn = true;
 
+        // 获取匹配点的两个特征点
         const cv::KeyPoint &kp1 = mvKeys1[mvMatches12[i].first];
         const cv::KeyPoint &kp2 = mvKeys2[mvMatches12[i].second];
 
+        // 初始帧特征点(u1, v1)
+        // 当前帧特征点(u2, v2)
         const float u1 = kp1.pt.x;
         const float v1 = kp1.pt.y;
         const float u2 = kp2.pt.x;
@@ -487,45 +619,64 @@ float Initializer::CheckFundamental(const cv::Mat &F21, vector<bool> &vbMatchesI
         // Reprojection error in second image
         // l2=F21x1=(a2,b2,c2)
 
+        // 这里通过计算点到直线距离实现误差的测量
+
+        // 利用基础矩阵计算极线的系数
         const float a2 = f11*u1+f12*v1+f13;
         const float b2 = f21*u1+f22*v1+f23;
         const float c2 = f31*u1+f32*v1+f33;
 
+        // 点到直线距离公式
         const float num2 = a2*u2+b2*v2+c2;
 
         const float squareDist1 = num2*num2/(a2*a2+b2*b2);
 
+        // 误差乘卡方检验需要的权值
         const float chiSquare1 = squareDist1*invSigmaSquare;
 
+        // 如果误差大于阈值，则标记为外点
         if(chiSquare1>th)
             bIn = false;
         else
+            // 如果误差小于等于权值，为了和単应矩阵对比保持分数统一，所以使用了thScore这个阈值
             score += thScore - chiSquare1;
 
         // Reprojection error in second image
         // l1 =x2tF21=(a1,b1,c1)
 
+        // 这里同样求反方向的误差
+        // 因为基础矩阵原理：p2^t * F21 * p1 = 0
+        // 则：p1^t * F21^t * p2 = 0
+        // 所以反方向的基础矩阵直接转置就可以
+
+        // 利用基础矩阵求得极线系数，注意与上面求的是相反的，这里的F使用了上面F的转置
         const float a1 = f11*u2+f21*v2+f31;
         const float b1 = f12*u2+f22*v2+f32;
         const float c1 = f13*u2+f23*v2+f33;
 
+        // 点到直线的距离公式
         const float num1 = a1*u1+b1*v1+c1;
 
         const float squareDist2 = num1*num1/(a1*a1+b1*b1);
 
+        // 将误差乘卡方检验需要的权值
         const float chiSquare2 = squareDist2*invSigmaSquare;
 
+        // 如果误差大于阈值，那么标记为外点
         if(chiSquare2>th)
             bIn = false;
         else
+            // 如果误差小于等于阈值，则计算分数
             score += thScore - chiSquare2;
 
+        // 利用vbMatchesInliers来记录当前基础矩阵对应的所有内点和外点
         if(bIn)
             vbMatchesInliers[i]=true;
         else
             vbMatchesInliers[i]=false;
     }
 
+    // 返回基础矩阵的评分
     return score;
 }
 

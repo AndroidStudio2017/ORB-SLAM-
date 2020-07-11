@@ -295,7 +295,7 @@ void Tracking::Track()
     // Get Map Mutex -> Map cannot be changed
     unique_lock<mutex> lock(mpMap->mMutexMapUpdate);
 
-    // 如果为初始化，那么进行初始化
+    // 如果未初始化，那么进行初始化
     if(mState==NOT_INITIALIZED)
     {
         // 如果当前是双目或者RGBD，则用双目初始化
@@ -663,7 +663,7 @@ void Tracking::MonocularInitialization()
                                                         // mvIniMatches[i]保存初始帧第i个特征点匹配的当前帧特征点索引
                                     Rcw, tcw,           // 求出的旋转和平移矩阵，世界坐标系相对于当前帧坐标系
                                     mvIniP3D,           // 求出初始化的3D点
-                                    vbTriangulated))    // 
+                                    vbTriangulated))    // 标记特征点是否三角化成功
         {
             for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
             {
